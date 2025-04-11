@@ -56,6 +56,7 @@ contract LaunchpadFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable 
      * @param _liquidityTokens The token amount to be paired with USDC for liquidity (18 decimals).
      * @param _platformfees The token amount reserved as a platform fee (18 decimals).
      * @param _basePrice Base price per token in USDC (6 decimals).
+     * @return tokenAddr The address of the newly deployed token contract.
      * @return launchpadAddr The address of the newly deployed launchpad contract.
      */
     function createLaunchpad(
@@ -63,6 +64,7 @@ contract LaunchpadFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable 
         string memory _tokenSymbol,
         address _usdc,
         address _uniswapRouter,
+        address _uniswapFactory,
         address _creator,
         uint256 _fundingGoal,
         uint256 _initialSupply,
@@ -71,7 +73,7 @@ contract LaunchpadFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable 
         uint256 _liquidityTokens,
         uint256 _platformfees,
         uint256 _basePrice
-    ) external returns (address launchpadAddr) {
+    ) external returns (address tokenAddr, address launchpadAddr) {
         // Deploy a new ERC20Token contract.
         ERC20Token token = new ERC20Token(_creator, _tokenName, _tokenSymbol, _initialSupply);
 
@@ -83,6 +85,7 @@ contract LaunchpadFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable 
             token: address(token),
             usdc: _usdc,
             uniswapRouter: _uniswapRouter,
+            uniswapFactory: _uniswapFactory,
             creator: _creator,
             fundingGoal: _fundingGoal,
             tokensForSale: _tokensForSale,
@@ -96,8 +99,8 @@ contract LaunchpadFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable 
         launchpad.initialize(config);
 
         tokenLaunchpad.push(address(launchpad));
-        emit LaunchpadCreated(address(launchpad), address(token), msg.sender);
-        return address(launchpad);
+        emit LaunchpadCreated(address(launchpad), address(token), _creator);
+        return (address(token), address(launchpad));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -132,5 +135,10 @@ contract LaunchpadFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable 
      */
     function getLaunchpads() external view returns (address[] memory) {
         return tokenLaunchpad;
+    }
+
+    /// @notice Returns the version of the contract
+    function version() public pure returns (uint256) {
+        return 1;
     }
 }
