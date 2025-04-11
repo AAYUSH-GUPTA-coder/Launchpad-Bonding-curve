@@ -8,6 +8,7 @@ import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/ut
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IUniswapV2Router} from "./interfaces/IUniswapV2Router.sol";
+import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 
 contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
     /*//////////////////////////////////////////////////////////////
@@ -34,6 +35,7 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
 
     // Uniswap router for liquidity addition.
     IUniswapV2Router public uniswapRouter;
+    IUniswapV2Factory public uniswapFactory;
 
     /*//////////////////////////////////////////////////////////////
                           STATE VARIABLES
@@ -62,7 +64,9 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
                             EVENTS
     //////////////////////////////////////////////////////////////*/
     event TokensPurchased(address indexed buyer, uint256 tokenAmount, uint256 cost);
-    event FundraisingFinalized(uint256 totalUSDC, uint256 liquidityUSDC, uint256 liquidityAmount, uint256 liquidity);
+    event FundraisingFinalized(
+        uint256 totalUSDC, uint256 liquidityUSDC, uint256 liquidityAmount, uint256 liquidity, address pair
+    );
 
     /*//////////////////////////////////////////////////////////////
                             MODIFIERS
@@ -85,6 +89,7 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
         address token;
         address usdc;
         address uniswapRouter;
+        address uniswapFactory;
         address creator;
         uint256 fundingGoal;
         uint256 tokensForSale;
@@ -116,22 +121,20 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
      * @param _amount Number of tokens to purchase (18 decimals).
      */
     function buyTokens(uint256 _amount) external nonReentrant checkZero(_amount) {
-        // require(!fundraisingFinalized, "Fundraising finalized");
         if (fundraisingFinalized) revert Launchpad__FundraisingFinalized();
-        // require(tokensSold + _amount <= tokensForSale, "Exceeds tokens available for sale");
         if (tokensSold + _amount > tokensForSale) revert Launchpad__ExceedsTokensAvailableForSale();
 
         uint256 cost = calculateTokenPrice() * _amount;
-        // Transfer USDC from buyer (USDC has 6 decimals)
-        usdc.safeTransferFrom(msg.sender, address(this), cost);
-
         tokensSold += _amount;
         usdcRaised += cost;
 
+        emit TokensPurchased(msg.sender, _amount, cost);
+
+        // Receive USDC from buyer (USDC has 6 decimals)
+        usdc.safeTransferFrom(msg.sender, address(this), cost);
+
         // Transfer purchased tokens to buyer
         token.safeTransfer(msg.sender, _amount);
-
-        emit TokensPurchased(msg.sender, _amount, cost);
     }
 
     /**
@@ -140,11 +143,8 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
      * uint deadline = block.timestamp + 600; // 10 minutes in the future
      */
     function finalizeFundraising(uint256 _liquidityDeadline) external nonReentrant {
-        // require(msg.sender == creator, "Only creator can finalize");
         if (msg.sender != creator) revert Launchpad__OnlyCreator();
-        // require(!fundraisingFinalized, "Already finalized");
         if (fundraisingFinalized) revert Launchpad__FundraisingFinalized();
-        // require(tokensSold == tokensForSale, "Sale not completed");
         if (tokensSold < tokensForSale) revert Launchpad__SaleNotCompleted();
 
         // Transfer creator reward tokens to the creator.
@@ -153,24 +153,21 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
         // Split the USDC raised into two halves.
         uint256 halfUSDC = usdcRaised / 2;
 
+        fundraisingFinalized = true;
+
         // Approve Uniswap router to spend the USDC and tokens for liquidity.
         usdc.approve(address(uniswapRouter), halfUSDC);
         token.approve(address(uniswapRouter), liquidityAmount);
 
-        // Add liquidity on Uniswap (using minimum amounts of 0 here for demonstration).
+        // Create the Uniswap Pair / Pool
+        address pair = uniswapFactory.createPair(address(token), address(usdc));
+
+        // Add liquidity on Uniswap.
         (uint256 amountToken, uint256 amountUSDC, uint256 liquidity) = uniswapRouter.addLiquidity(
-            address(token),
-            address(usdc),
-            liquidityAmount,
-            halfUSDC,
-            0,
-            0,
-            creator, // Liquidity tokens are sent to the creator (or a designated address)
-            _liquidityDeadline
+            address(token), address(usdc), liquidityAmount, halfUSDC, 0, 0, creator, _liquidityDeadline
         );
 
-        emit FundraisingFinalized(usdcRaised, amountUSDC, amountToken, liquidity);
-        fundraisingFinalized = true;
+        emit FundraisingFinalized(usdcRaised, amountUSDC, amountToken, liquidity, pair);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -185,6 +182,8 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
         token = IERC20(config.token);
         usdc = IERC20(config.usdc);
         uniswapRouter = IUniswapV2Router(config.uniswapRouter);
+        uniswapFactory = IUniswapV2Factory(config.uniswapFactory);
+
         creator = config.creator;
 
         tokensForSale = config.tokensForSale;
@@ -204,7 +203,8 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
      * @return The reserve ratio.
      */
     function calculateReserveRatio() public returns (uint256) {
-        uint256 totalValueOfFundraiseToken = tokensForSale * basePrice;
+        uint256 basePrice18 = basePrice * 1e12;
+        uint256 totalValueOfFundraiseToken = tokensForSale * basePrice18;
         reserveRatio = (fundingGoal * 1e18) / totalValueOfFundraiseToken;
         return reserveRatio;
     }
@@ -340,5 +340,10 @@ contract FundraisingLaunchpad is Initializable, UUPSUpgradeable, OwnableUpgradea
      */
     function getReserveRatio() public view returns (uint256) {
         return reserveRatio;
+    }
+
+    /// @notice Returns the version of the contract
+    function version() public pure returns (uint256) {
+        return 1;
     }
 }
